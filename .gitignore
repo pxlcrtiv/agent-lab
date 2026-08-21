@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# agent-lab runtime artifacts
+.agentlab/
+.agentlab-demo/
+demo/session.txt
+demo/session-todo.json
+demo/session-memory.jsonl
+demo/frames/
+examples/*.state.json
+
+# OS
+.DS_Store
