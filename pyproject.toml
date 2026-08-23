@@ -9,7 +9,7 @@ description = "A lean, dependency-free AI agent framework: tool use, memory, and
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "pxlcrtiv", url = "https://github.com/pxlcrtiv" }]
+authors = [{ name = "pxlcrtiv" }]
 keywords = ["ai-agent", "function-calling", "llm", "workflow", "memory", "tool-use"]
 classifiers = [
     "Development Status :: 3 - Alpha",
