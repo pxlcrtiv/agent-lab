@@ -204,7 +204,7 @@ def main(argv=None) -> int:
 
     p_wf = sub.add_parser("workflow", help="run one of the example workflows")
     p_wf.add_argument("path", help="path to a workflow module (must expose `workflow`)")
-    p_wf.add_argument("--state", action="append", default=[], metavar="k=v", help="initial state entries")
+    p_wf.add_argument("--state", nargs="+", default=[], metavar="k=v", help="initial state entries, e.g. --state key1=val1 key2=val2")
     p_wf.add_argument("--describe", action="store_true", help="print the step plan and exit")
     p_wf.add_argument("--persist", action="store_true", help="write final state JSON next to the module")
     p_wf.set_defaults(fn=_cmd_workflow)
