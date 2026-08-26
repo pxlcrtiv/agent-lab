@@ -64,7 +64,7 @@ python3 -m agentlab run "What time is it in London?"    # no install step
 python3 -m agentlab chat                                # interactive REPL
 python3 -m agentlab workflow examples/lead_triage.py \
     --state role_type=ai-agent-engineer remote=true visa=true
-python3 -m unittest discover -s tests -v                # 29 tests, no deps
+python3 -m unittest discover -s tests -v                # 33 tests, no deps
 ```
 
 That first command already shows the loop: the agent calls the `clock` tool,
@@ -113,7 +113,7 @@ agentlab/            the framework (stdlib only)
   builtin_tools.py   clock, safe calculator, fetch, notes, todo
   cli.py             run / chat / workflow / demo commands
 examples/            lead_triage.py (job-lead routing), release.py (CI-ish)
-tests/               29 unit tests — unittest, no dependencies
+tests/               33 unit tests — unittest, no dependencies
 demo/                make_demo.sh + render_gif.py rebuild the README GIF
 .github/workflows/   CI: tests + CLI smoke tests on Python 3.10/3.11/3.12
 ```
