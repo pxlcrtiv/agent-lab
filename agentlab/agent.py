@@ -19,6 +19,7 @@ system prompt, the current task and the latest exchange intact.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -93,6 +94,10 @@ class Agent:
 
             if not calls:
                 answer = str(reply.get("content") or "(no content)")
+                # Some providers (Qwen3-style templates) append a stray
+                # <tool_call> continuation tag after the final answer. Drop it.
+                if "<tool_call" in answer:
+                    answer = re.sub(r"\s*</?tool_call>.*$", "", answer, flags=re.S).strip()
                 answer_turn = turn
                 break
 

@@ -64,7 +64,8 @@ python3 -m agentlab run "What time is it in London?"    # no install step
 python3 -m agentlab chat                                # interactive REPL
 python3 -m agentlab workflow examples/lead_triage.py \
     --state role_type=ai-agent-engineer remote=true visa=true
-python3 -m unittest discover -s tests -v                # 33 tests, no deps
+python3 -m agentlab run "..." --critic                  # score the answer
+python3 -m unittest discover -s tests -v                # 49 tests, no deps
 ```
 
 That first command already shows the loop: the agent calls the `clock` tool,
@@ -83,6 +84,20 @@ The mock backend is used by default so CI, tests, and this README's demo are
 hermetic. The OpenAI-compatible backend talks HTTP through stdlib `urllib`
 only.
 
+### Self-evaluation (`--critic`)
+
+```bash
+python3 -m agentlab run "..." --critic
+python3 -m agentlab run "..." --backend openai --critic --max-revisions 1
+```
+
+Every answer is scored against a rubric (**grounded, complete, concise,
+safe**) by a second model pass. A `revise` verdict drafts a corrected answer
+— with the full **tool transcript** in front of the model so revisions stay
+grounded in what the tools actually returned — and re-scores, up to
+`--max-revisions` rounds. The same loop runs against a deterministic
+offline scorer in tests and CI.
+
 ## Design notes worth stealing
 
 - **Schemas can't drift.** `@tool` derives the JSON schema from the
@@ -100,6 +115,9 @@ only.
 - **Safe by default.** The calculator tool whitelists AST nodes (no `eval`),
   `fetch` is read-only with a size cap, and the loop has a "repeated
   identical tool call" guard.
+- **Answers get graded, not just generated.** `--critic` scores the answer
+  on a rubric, and any revision is grounded in the tool transcript, so the
+  model can't "fix" a good answer by un-grounding it.
 
 ## Repository layout
 
@@ -112,8 +130,9 @@ agentlab/            the framework (stdlib only)
   workflow.py        state-machine engine: retries, guards, compensation
   builtin_tools.py   clock, safe calculator, fetch, notes, todo
   cli.py             run / chat / workflow / demo commands
+  critic.py          self-evaluation: rubric scoring + grounded revision
 examples/            lead_triage.py (job-lead routing), release.py (CI-ish)
-tests/               33 unit tests — unittest, no dependencies
+tests/               49 unit tests — unittest, no dependencies
 demo/                make_demo.sh + render_gif.py rebuild the README GIF
 .github/workflows/   CI: tests + CLI smoke tests on Python 3.10/3.11/3.12
 ```

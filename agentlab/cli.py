@@ -24,6 +24,7 @@ from pathlib import Path
 from . import __version__
 from .agent import Agent
 from .builtin_tools import default_tool_registry
+from .critic import Critic, MockCritic
 from .llm import MockBackend, OpenAICompatBackend
 from .memory import Memory
 
@@ -37,7 +38,7 @@ def _agent_dir() -> Path:
     return base
 
 
-def _build_agent(backend_name: str) -> Agent:
+def _build_agent(backend_name: str):
     backend_name = backend_name or os.environ.get("AGENTLAB_BACKEND", "mock")
     if backend_name == "mock":
         backend: object = MockBackend()
@@ -46,8 +47,8 @@ def _build_agent(backend_name: str) -> Agent:
     else:
         sys.exit("unknown backend %r (use mock or openai)" % backend_name)
 
-    mem_path = _agent_dir() / DEMO_MEM_PATH
-    todo_path = _agent_dir() / DEMO_TODO_PATH
+    mem_path = _agent_dir() / "memory.jsonl"
+    todo_path = _agent_dir() / "todo.json"
     if backend_name == "mock":
         mem_path = Path(DEMO_MEM_PATH)  # keep the demo hermetic: memory lives in cwd
         todo_path = Path(DEMO_TODO_PATH)
@@ -55,7 +56,7 @@ def _build_agent(backend_name: str) -> Agent:
 
     mem = Memory(mem_path)
     registry = default_tool_registry(mem, todo_path)
-    return Agent(backend, registry, memory=mem)  # type: ignore[arg-type]
+    return Agent(backend, registry, memory=mem), backend  # type: ignore[arg-type]
 
 
 def _print_run(result) -> None:
@@ -72,15 +73,29 @@ def _print_run(result) -> None:
     print("final: %s" % result.answer)
 
 
+def _print_critic(critique) -> None:
+    scores = " ".join("%s=%d/5" % (k, v) for k, v in sorted(critique.scores.items()))
+    print("critic: %s overall=%d/5 verdict=%s" % (scores, critique.overall, critique.verdict))
+    for i, rev in enumerate(critique.revisions, 1):
+        print("  critic round %d: overall=%d/5 verdict=revise" % (i, rev["overall"]))
+    print("  critic feedback: %s" % critique.feedback)
+    if critique.revisions:
+        print("final (revised): %s" % critique.answer)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
-    agent = _build_agent(args.backend)
+    agent, backend = _build_agent(args.backend)
     result = agent.run(args.task)
     _print_run(result)
+    if args.critic:
+        critic = MockCritic(backend) if backend.name == "mock" else Critic(backend, max_revisions=args.max_revisions)
+        critique = critic.run(args.task, result.answer, steps=result.steps)
+        _print_critic(critique)
     return 0
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    agent = _build_agent(args.backend)
+    agent, _ = _build_agent(args.backend)
     print("agent-lab %s -- tools: %s" % (__version__, ", ".join(agent.tools.names())))
     print("commands: /tools /memory /quit")
     while True:
@@ -196,6 +211,8 @@ def main(argv=None) -> int:
     p_run = sub.add_parser("run", help="one-shot agent run")
     p_run.add_argument("task", help="the task to run")
     p_run.add_argument("--backend", choices=["mock", "openai"], default=None, help="LLM backend (default: env AGENTLAB_BACKEND or mock)")
+    p_run.add_argument("--critic", action="store_true", help="self-evaluate the answer against a rubric (scores + optional revision)")
+    p_run.add_argument("--max-revisions", type=int, default=2, help="max revise rounds for --critic (default: 2)")
     p_run.set_defaults(fn=_cmd_run)
 
     p_chat = sub.add_parser("chat", help="interactive REPL")
