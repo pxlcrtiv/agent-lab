@@ -1,0 +1,27 @@
+[
+  {
+    "title": "Keep commit messages imperative",
+    "body": "Write commit messages in the imperative mood: 'Fix bug' not 'Fixed bug'. This matches the convention used across the portfolio repos.",
+    "command": "git log --oneline -5"
+  },
+  {
+    "title": "Use .daily-pause to skip a run",
+    "body": "Touch .daily-pause in the repo root to pause Daily Green for that repo only. Remove the file to resume. Useful when a repo is in active development and you don't want daily commits.",
+    "command": "ls .daily-pause 2>/dev/null && echo paused || echo active"
+  },
+  {
+    "title": "Verify branch before pushing",
+    "body": "Always run `git status` and `git diff --stat` before pushing to a shared branch. This catches uncommitted changes and accidental commits to the wrong branch.",
+    "command": "git status --short"
+  },
+  {
+    "title": "Check GitHub token scopes",
+    "body": "If PR creation or draft-state updates fail, check token scopes with `gh auth status`. The `repo` scope is required for write operations on pull requests.",
+    "command": "gh auth status --show-token 2>&1 | head -10"
+  },
+  {
+    "title": "Architecture scan is idempotent",
+    "body": "The architecture scan script only commits when the report content changes. Running it multiple times per day produces no extra commits — safe for CI schedules.",
+    "command": "python3 scripts/architecture_scan.py ."
+  }
+]
