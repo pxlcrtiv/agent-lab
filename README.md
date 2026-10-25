@@ -65,7 +65,7 @@ python3 -m agentlab chat                                # interactive REPL
 python3 -m agentlab workflow examples/lead_triage.py \
     --state role_type=ai-agent-engineer remote=true visa=true
 python3 -m agentlab run "..." --critic                  # score the answer
-python3 -m unittest discover -s tests -v                # 49 tests, no deps
+python3 -m unittest discover -s tests -v                # 65 tests, no deps
 ```
 
 That first command already shows the loop: the agent calls the `clock` tool,
@@ -103,6 +103,9 @@ offline scorer in tests and CI.
 - **Schemas can't drift.** `@tool` derives the JSON schema from the
   annotated signature and the docstring's `Args:` section — one definition
   per tool, and it survives `from __future__ import annotations`.
+- **Tools own their state.** A tool that needs a memory store or a todo file
+  is *built* with it, so two tool sets in one process never interfere and
+  there are no half-wired globals to leak into model-visible context.
 - **Tool calls never raise.** `ToolRegistry.call()` returns
   `{"ok": bool, ...}`; the agent feeds that straight back to the model, so a
   crashing tool degrades to a model-visible message instead of killing the run.
@@ -132,7 +135,7 @@ agentlab/            the framework (stdlib only)
   cli.py             run / chat / workflow / demo commands
   critic.py          self-evaluation: rubric scoring + grounded revision
 examples/            lead_triage.py (job-lead routing), release.py (CI-ish)
-tests/               49 unit tests — unittest, no dependencies
+tests/               65 unit tests — unittest, no dependencies
 demo/                make_demo.sh + render_gif.py rebuild the README GIF
 .github/workflows/   CI: tests + CLI smoke tests on Python 3.10/3.11/3.12
 ```

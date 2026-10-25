@@ -4,6 +4,12 @@ Every tool is declared with ``@tool``; the JSON schema the model sees is
 derived from the annotated signature and the ``Args:`` section of the
 docstring -- one definition, zero drift.
 
+Tools that need state take it as an argument when they are built, so each
+tool carries the dependency it works with: a notes tool holds the memory
+store it was built for, a todo tool holds the file it was built for.
+Nothing lives in module globals, so two tool sets built for different
+sessions never interfere and the model never sees a "not wired" error.
+
 Security note: the ``calculator`` tool uses an AST whitelist, never
 ``eval()``. The ``fetch`` tool is a read-only GET with a hard size cap.
 """
@@ -11,9 +17,8 @@ Security note: the ``calculator`` tool uses an AST whitelist, never
 from __future__ import annotations
 
 import ast
-import operator
 import json
-import time
+import operator
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -22,9 +27,9 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .memory import Memory
-from .tools import tool
+from .tools import Tool, ToolRegistry, tool
 
-__all__ = ["default_tool_registry"]
+__all__ = ["build_tools", "default_tool_registry", "calculator", "clock", "fetch"]
 
 
 # -- calculator: safe arithmetic via AST whitelist ---------------------------------
@@ -120,112 +125,96 @@ def fetch(url: str, max_chars: int = 4000) -> str:
     return text[:max_chars]
 
 
-# -- notes: memory-backed facts ---------------------------------------------------------
+# -- notes: memory-backed facts, built for one memory store ---------------------------
 
-@tool
-def notes_add(value: str) -> str:
-    """Write a fact or note into agent memory.
+def _notes_tools(memory: Memory) -> List[Tool]:
+    """Build the memory-backed tools, bound to a single memory store."""
 
-    Args:
-        value: the fact or note to remember.
-    """
-    entry = _memory().remember(value, kind="note")
-    return "saved note #%d: %s" % (len(_memory().all(kind="note")), value)
+    @tool
+    def notes_add(value: str) -> str:
+        """Write a fact or note into agent memory.
 
+        Args:
+            value: the fact or note to remember.
+        """
+        memory.remember(value, kind="note")
+        return "saved note #%d: %s" % (len(memory.all(kind="note")), value)
 
-@tool
-def notes_search(query: str, k: int = 3) -> str:
-    """Search notes and facts stored in agent memory.
+    @tool
+    def notes_search(query: str, k: int = 3) -> str:
+        """Search notes and facts stored in agent memory.
 
-    Args:
-        query: keywords to match.
-        k: how many matches to return.
-    """
-    hits = _memory().recall(query, k=k, kinds=("note", "fact"))
-    return "\n".join("- [%s] %s" % (e["kind"], e["text"]) for e in hits) or "no memory matches"
+        Args:
+            query: keywords to match.
+            k: how many matches to return.
+        """
+        hits = memory.recall(query, k=k, kinds=("note", "fact"))
+        return "\n".join("- [%s] %s" % (e["kind"], e["text"]) for e in hits) or "no memory matches"
 
-
-# -- todo: a small per-session task list (persisted to the memory dir) -------------------
-
-_TODO_PATH: Optional[Path] = None
-
-
-def _todo_path() -> Path:
-    if _TODO_PATH is None:
-        raise RuntimeError("todo backend not wired (call set_todo_path)")
-    return _TODO_PATH
+    return [notes_add, notes_search]
 
 
-def _load_todo() -> List[str]:
-    p = _todo_path()
-    if not p.exists():
-        return []
-    return json.loads(p.read_text(encoding="utf-8"))
+# -- todo: a small per-session task list, built for one file --------------------------
 
+def _todo_tools(todo_path: Path) -> List[Tool]:
+    """Build the todo tools, bound to a single todo file."""
 
-def _save_todo(items: List[str]) -> None:
-    _todo_path().write_text(json.dumps(items, indent=2), encoding="utf-8")
+    def load_items() -> List[str]:
+        if not todo_path.exists():
+            return []
+        return json.loads(todo_path.read_text(encoding="utf-8"))
 
+    def save_items(items: List[str]) -> None:
+        todo_path.parent.mkdir(parents=True, exist_ok=True)
+        todo_path.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
-@tool
-def todo_add(item: str) -> str:
-    """Add a task to the todo list.
+    @tool
+    def todo_add(item: str) -> str:
+        """Add a task to the todo list.
 
-    Args:
-        item: task description.
-    """
-    items = _load_todo()
-    items.append(item)
-    _save_todo(items)
-    return "todo now has %d item(s): %s" % (len(items), "; ".join(items))
+        Args:
+            item: task description.
+        """
+        items = load_items()
+        items.append(item)
+        save_items(items)
+        return "todo now has %d item(s): %s" % (len(items), "; ".join(items))
 
+    @tool
+    def todo_list() -> str:
+        """List all todo items."""
+        items = load_items()
+        return "todo (%d):\n%s" % (len(items), "\n".join("  %d. %s" % (i + 1, x) for i, x in enumerate(items))) if items else "todo is empty"
 
-@tool
-def todo_list() -> str:
-    """List all todo items."""
-    items = _load_todo()
-    return "todo (%d):\n%s" % (len(items), "\n".join("  %d. %s" % (i + 1, x) for i, x in enumerate(items))) if items else "todo is empty"
+    @tool
+    def todo_remove(index: int) -> str:
+        """Remove a todo item by its 1-based index.
 
+        Args:
+            index: 1-based position in the list.
+        """
+        items = load_items()
+        if not 1 <= index <= len(items):
+            raise ValueError("index %d out of range (have %d items)" % (index, len(items)))
+        removed = items.pop(index - 1)
+        save_items(items)
+        return "removed %r; %d item(s) left" % (removed, len(items))
 
-@tool
-def todo_remove(index: int) -> str:
-    """Remove a todo item by its 1-based index.
-
-    Args:
-        index: 1-based position in the list.
-    """
-    items = _load_todo()
-    if not 1 <= index <= len(items):
-        raise ValueError("index %d out of range (have %d items)" % (index, len(items)))
-    removed = items.pop(index - 1)
-    _save_todo(items)
-    return "removed %r; %d item(s) left" % (removed, len(items))
+    return [todo_add, todo_list, todo_remove]
 
 
 # -- wiring ---------------------------------------------------------------------------------
 
-_memory_ref: Dict[str, Memory] = {}
+def build_tools(memory: Memory, todo_path: Path) -> List[Tool]:
+    """Build the built-in tools, each bound to the dependencies it needs.
+
+    Every tool in the returned list is self-contained: it holds the memory
+    store or the todo file it was built with. Tool sets for different
+    sessions can therefore coexist in one process without interfering.
+    """
+    return [clock, calculator, fetch, *_notes_tools(memory), *_todo_tools(todo_path)]
 
 
-def _memory() -> Memory:
-    if "_mem" not in _memory_ref:
-        raise RuntimeError("memory not wired (call bind_memory)")
-    return _memory_ref["_mem"]
-
-
-def set_todo_path(path: Path) -> None:
-    global _TODO_PATH
-    _TODO_PATH = path
-
-
-def bind_memory(mem: Memory) -> None:
-    _memory_ref["_mem"] = mem
-
-
-def default_tool_registry(memory: Memory, todo_path: Path) -> "ToolRegistry":
+def default_tool_registry(memory: Memory, todo_path: Path) -> ToolRegistry:
     """Registry with all built-in tools wired to a shared memory store."""
-    from .tools import ToolRegistry
-
-    bind_memory(memory)
-    set_todo_path(todo_path)
-    return ToolRegistry(clock, calculator, fetch, notes_add, notes_search, todo_add, todo_list, todo_remove)
+    return ToolRegistry(*build_tools(memory, todo_path))
