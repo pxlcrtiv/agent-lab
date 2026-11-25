@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .llm import ChatBackend
+from .run_evidence import RunEvidence
 
 __all__ = ["Critic", "MockCritic", "Critique", "DEFAULT_RUBRIC"]
 
@@ -79,11 +80,11 @@ class Critic:
 
     # -- public --------------------------------------------------------------
 
-    def run(self, task: str, answer: str, steps: Optional[list] = None) -> Critique:
-        critique = Critique(task=task, answer=answer)
-        self._transcript = self._render_transcript(steps or [])
+    def run(self, evidence: RunEvidence) -> Critique:
+        critique = Critique(task=evidence.task, answer=evidence.answer)
+        transcript = evidence.render_tool_transcript()
         for round_no in range(1, self.max_revisions + 2):  # +1 initial score
-            self._score_round(critique, round_no)
+            self._score_round(critique, round_no, transcript)
             if critique.passed:
                 break
             critique.revisions.append(
@@ -96,7 +97,7 @@ class Critic:
             )
             if round_no > self.max_revisions:
                 break
-            critique.answer = self._revise(task, critique.answer, critique.feedback)
+            critique.answer = self._revise(evidence.task, critique.answer, critique.feedback, transcript)
         return critique
 
     # -- internals -----------------------------------------------------------
@@ -104,28 +105,17 @@ class Critic:
     def _rubric_text(self) -> str:
         return "\n".join("- %s: %s" % (k, d) for k, d in self.rubric)
 
-    @staticmethod
-    def _render_transcript(steps: list) -> str:
-        """Render agent steps as a compact tool transcript for the critic."""
-        lines = []
-        for s in steps:
-            if s.kind == "tool_call":
-                lines.append("  -> tool call : %s %s" % (s.name, s.detail))
-            elif s.kind == "tool_result":
-                lines.append("  <- tool result: %s => %s" % (s.name, s.detail))
-        return "\n".join(lines) if lines else "(no tools were called)"
-
     def _ask(self, system: str, user: str) -> str:
         reply = self.backend.chat(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]
         )
         return str(reply.get("content") or "")
 
-    def _score_round(self, critique: Critique, round_no: int) -> "Critique":
+    def _score_round(self, critique: Critique, round_no: int, transcript: str) -> "Critique":
         user = (
             "TASK:\n%s\n\nANSWER:\n%s\n\nRubric:\n%s"
             "\n\nTOOL TRANSCRIPT (what the agent's tools actually returned):\n%s"
-            % (critique.task, critique.answer, self._rubric_text(), self._transcript)
+            % (critique.task, critique.answer, self._rubric_text(), transcript)
         )
         raw = self._ask(CRITIC_SYSTEM, user)
         parsed = self._parse_json(raw)
@@ -147,11 +137,11 @@ class Critic:
         critique.feedback = str(parsed.get("feedback") or "Improve the answer.")
         return critique
 
-    def _revise(self, task: str, answer: str, feedback: str) -> str:
+    def _revise(self, task: str, answer: str, feedback: str, transcript: str) -> str:
         user = (
             "TASK:\n%s\n\nCURRENT ANSWER:\n%s\n\nEVALUATOR FEEDBACK:\n%s\n\n"
             "TOOL TRANSCRIPT:\n%s\n\n"
-            "Write the improved answer." % (task, answer, feedback, self._transcript)
+            "Write the improved answer." % (task, answer, feedback, transcript)
         )
         revised = self._ask(REVISE_SYSTEM, user).strip()
         return revised or answer
@@ -184,7 +174,7 @@ class MockCritic(Critic):
     Rules (kept simple so tests and the demo are predictable):
 
     * an answer quoting a tool result ("came back clean" / "=>") is grounded.
-    * loop-guard / budget failures ("Stopped:") get a revise verdict.
+    * a non-final run ``stop_reason`` gets a revise verdict on the first score.
     * an over-long answer (>= 400 chars) is marked "concise" 3/5 -> revise.
     * a revise round appends a fixing sentence, then passes.
     """
@@ -198,11 +188,10 @@ class MockCritic(Critic):
         self.min_pass = min_pass
         self.max_revisions = max_revisions
 
-    def run(self, task: str, answer: str, steps: Optional[list] = None) -> Critique:
-        critique = Critique(task=task, answer=answer)
-        self._transcript = self._render_transcript(steps or [])
+    def run(self, evidence: RunEvidence) -> Critique:
+        critique = Critique(task=evidence.task, answer=evidence.answer)
         for round_no in range(1, self.max_revisions + 2):
-            self._mock_score(critique)
+            self._mock_score(critique, evidence, round_no)
             if critique.passed:
                 break
             critique.revisions.append(
@@ -215,25 +204,28 @@ class MockCritic(Critic):
             )
             if round_no > self.max_revisions:
                 break
-            critique.answer = self._mock_revise(critique)
+            critique.answer = self._mock_revise(critique, evidence)
         return critique
 
-    def _mock_revise(self, critique: Critique) -> str:
+    def _mock_revise(self, critique: Critique, evidence: RunEvidence) -> str:
         answer = critique.answer
-        if "Stopped:" in answer:
-            base = answer.split("Stopped:", 1)[1].strip() or "the task"
-            return "revised answer: I used the returned tool result to answer %s: %s" % (
-                critique.task,
-                base,
+        if evidence.stopped:
+            if evidence.exchanges:
+                return "revised answer: I used the returned tool result to answer %s: %s" % (
+                    critique.task,
+                    answer,
+                )
+            return "revised answer: No tool result was available before the run stopped (%s)." % (
+                evidence.stop_reason.replace("_", " "),
             )
         if len(answer) >= 400:
             return answer[:190].rstrip() + " [revised: trimmed to be concise]"
         return answer + " (revised: grounds the answer in the tool result)"
 
-    def _mock_score(self, critique: Critique) -> None:
+    def _mock_score(self, critique: Critique, evidence: RunEvidence, round_no: int) -> None:
         answer = critique.answer
         grounded = 5 if ("came back clean" in answer or "=>" in answer or "tool" in answer.lower()) else 2
-        stopped = any(k in answer for k in ("Stopped:", "turn budget"))
+        stopped = round_no == 1 and evidence.stopped
         concise = 5 if len(answer) < 400 else 3
         complete = 2 if stopped else 5
         safe = 5

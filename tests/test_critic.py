@@ -4,6 +4,7 @@ import unittest
 
 from agentlab.critic import CRITIC_SYSTEM, Critic, MockCritic, REVISE_SYSTEM
 from agentlab.llm import ChatBackend
+from agentlab.run_evidence import RunEvidence, ToolExchange
 
 
 class ScriptedBackend(ChatBackend):
@@ -39,34 +40,46 @@ def pass_json(scores=None, overall=None, verdict="pass", feedback="All good."):
     )
 
 
+def _evidence(answer="answer", task="task", exchanges=(), stop_reason="final"):
+    return RunEvidence(
+        task=task,
+        answer=answer,
+        exchanges=tuple(exchanges),
+        stop_reason=stop_reason,
+    )
+
+
 class MockCriticTests(unittest.TestCase):
     def test_passes_a_grounded_answer_without_revision(self):
         c = MockCritic()
-        critique = c.run("What time is it in London?", "That result came back clean. 12:00 UTC.")
+        critique = c.run(_evidence("That result came back clean. 12:00 UTC."))
         self.assertTrue(critique.passed)
         self.assertGreaterEqual(critique.overall, 4)
         self.assertEqual(critique.revisions, [])
 
     def test_revises_a_loop_guard_answer_then_passes(self):
         c = MockCritic()
-        critique = c.run(
-            "What time is it in London?",
-            "Stopped: repeated identical tool call (clock) -- possible loop.",
-        )
+        critique = c.run(_evidence("The run ended early.", stop_reason="repeated_call"))
         self.assertTrue(critique.passed)
         self.assertEqual(len(critique.revisions), 1)
         self.assertIn("revised", critique.answer)
 
     def test_max_revisions_zero_locks_verdict(self):
         c = MockCritic(max_revisions=0)
-        critique = c.run("task", "Stopped: repeated identical tool call (clock) -- possible loop.")
+        critique = c.run(_evidence("The run ended early.", stop_reason="turn_budget"))
         self.assertFalse(critique.passed)
         self.assertEqual(len(critique.revisions), 1)
+
+    def test_final_stop_reason_does_not_infer_failure_from_answer_text(self):
+        c = MockCritic()
+        critique = c.run(_evidence("The tool came back clean. The word Stopped: was quoted data."))
+        self.assertTrue(critique.passed)
+        self.assertEqual(critique.revisions, [])
 
     def test_long_answer_flagged_not_concise_and_revised(self):
         c = MockCritic()
         blob = "That result came back clean. " + "filler words " * 80  # > 400 chars
-        critique = c.run("task", blob)
+        critique = c.run(_evidence(blob))
         self.assertEqual(len(critique.revisions), 1)  # flagged, then revised
         self.assertTrue(critique.passed)  # after one revision it passes
         self.assertEqual(critique.scores["concise"], 5)  # final round is concise
@@ -101,7 +114,7 @@ class CriticLoopTests(unittest.TestCase):
     def test_pass_on_first_round_no_revision_call(self):
         backend = ScriptedBackend([pass_json()])
         c = Critic(backend)
-        critique = c.run("task", "answer")
+        critique = c.run(_evidence())
         self.assertTrue(critique.passed)
         self.assertEqual(critique.revisions, [])
         self.assertEqual(len([x for x in backend.calls if "evaluator" in x]), 1)
@@ -116,7 +129,7 @@ class CriticLoopTests(unittest.TestCase):
             reviser_replies=["A grounded revised answer."],
         )
         c = Critic(backend)
-        critique = c.run("task", "old answer")
+        critique = c.run(_evidence("old answer"))
         self.assertTrue(critique.passed)
         self.assertEqual(len(critique.revisions), 1)
         self.assertEqual(critique.answer, "A grounded revised answer.")
@@ -128,14 +141,14 @@ class CriticLoopTests(unittest.TestCase):
             [pass_json(verdict="pass", scores={"grounded": 2, "complete": 2, "concise": 5, "safe": 5}, overall=2)]
         )
         c = Critic(backend, min_pass=4, max_revisions=0)
-        critique = c.run("task", "answer")
+        critique = c.run(_evidence())
         self.assertFalse(critique.passed)
         self.assertEqual(len(critique.revisions), 1)
 
     def test_malformed_evaluator_output_is_revise(self):
         backend = ScriptedBackend(["I think it's fine.", pass_json()], reviser_replies=["better answer"])
         c = Critic(backend)
-        critique = c.run("task", "answer")
+        critique = c.run(_evidence())
         self.assertEqual(len(critique.revisions), 1)
         self.assertIn("could not parse", critique.revisions[0]["feedback"])
 
@@ -148,7 +161,7 @@ class CriticLoopTests(unittest.TestCase):
             reviser_replies=["r1", "r2"],
         )
         c = Critic(backend, max_revisions=1)
-        critique = c.run("task", "answer")
+        critique = c.run(_evidence())
         self.assertEqual(len(critique.revisions), 2)  # initial + 1 revise round, then cap
         self.assertFalse(critique.passed)
         self.assertEqual(critique.answer, "r1")
@@ -156,15 +169,14 @@ class CriticLoopTests(unittest.TestCase):
     def test_system_prompts_are_used(self):
         backend = ScriptedBackend([pass_json()], reviser_replies=["x"])
         c = Critic(backend)
-        c.run("task", "answer")
+        c.run(_evidence())
         evaluator_call = next(x for x in backend.calls if "evaluator" in x)
         self.assertEqual(evaluator_call, CRITIC_SYSTEM)
         self.assertIn("evaluator", CRITIC_SYSTEM)
         self.assertIn("editor", REVISE_SYSTEM)
 
-    def test_transcript_is_passed_to_the_editor(self):
-        from agentlab.agent import Step
-
+    def test_complete_transcript_is_passed_to_evaluator_and_editor(self):
+        tool_result = "03:29:12 BST (UTC+0100) " + "x" * 400 + "transcript-tail"
         backend = ScriptedBackend(
             [
                 pass_json(verdict="revise", scores={"grounded": 2, "complete": 2, "concise": 5, "safe": 5}, overall=2),
@@ -173,19 +185,35 @@ class CriticLoopTests(unittest.TestCase):
             reviser_replies=["improved and grounded"],
         )
         c = Critic(backend)
-        steps = [
-            Step(1, "tool_call", "clock", '{"timezone": "Europe/London"}'),
-            Step(1, "tool_result", "clock", "03:29:12 BST (UTC+0100)"),
-        ]
-        c.run("task", "answer", steps=steps)
+        evidence = _evidence(
+            exchanges=[
+                ToolExchange(
+                    call_id="clock_1",
+                    turn=1,
+                    name="clock",
+                    arguments={"timezone": "Europe/London"},
+                    outcome={"ok": True, "tool": "clock", "result": tool_result},
+                )
+            ]
+        )
+        c.run(evidence)
         editor_idx = next(i for i, s in enumerate(backend.calls) if s == REVISE_SYSTEM)
         editor_user = backend.users[editor_idx]
         self.assertIn("TOOL TRANSCRIPT", editor_user)
-        self.assertIn("03:29:12 BST (UTC+0100)", editor_user)
-        self.assertIn("TOOL TRANSCRIPT", backend.users[0])  # evaluator sees it too
+        self.assertIn(tool_result, editor_user)
+        self.assertIn("transcript-tail", backend.users[0])  # evaluator sees it too
 
     def test_transcript_rendering_no_tools(self):
-        self.assertEqual(Critic._render_transcript([]), "(no tools were called)")
+        self.assertEqual(_evidence().render_tool_transcript(), "(no tools were called)")
+
+    def test_each_run_renders_its_own_evidence(self):
+        backend = ScriptedBackend([pass_json(), pass_json()])
+        c = Critic(backend)
+        c.run(_evidence(exchanges=[ToolExchange("long_1", 1, "echo", {}, {"ok": True, "result": "x" * 500})]))
+        c.run(_evidence())
+        self.assertIn("x" * 500, backend.users[0])
+        self.assertIn("(no tools were called)", backend.users[1])
+        self.assertNotIn("x" * 500, backend.users[1])
 
 
 if __name__ == "__main__":

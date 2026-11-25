@@ -25,6 +25,7 @@ from typing import List, Optional
 
 from .llm import ChatBackend, tool_result_message
 from .memory import Memory
+from .run_evidence import RunEvidence, StopReason, ToolExchange
 from .tools import ToolError, ToolRegistry
 
 __all__ = ["Agent", "AgentConfig", "AgentResult", "Step"]
@@ -51,6 +52,7 @@ class Step:
 class AgentResult:
     answer: str
     turns: int
+    evidence: RunEvidence
     tool_calls: int = 0
     context_chars: int = 0
     steps: List[Step] = field(default_factory=list)
@@ -79,6 +81,8 @@ class Agent:
 
     def run(self, task: str) -> AgentResult:
         steps: List[Step] = []
+        exchanges: List[ToolExchange] = []
+        stop_reason: StopReason = "final"
         tool_calls = 0
         messages = self._seed_context(task)
         answer = ""
@@ -118,23 +122,33 @@ class Agent:
                 steps.append(Step(turn, "tool_call", name, json.dumps(arguments)))
                 result = self.tools.call(name, arguments)
                 tool_calls += 1
+                exchanges.append(
+                    ToolExchange(
+                        call_id=call_id,
+                        turn=turn,
+                        name=name,
+                        arguments=arguments,
+                        outcome=result,
+                    )
+                )
                 payload = result.get("result") if result.get("ok") else result.get("error")
                 steps.append(Step(turn, "tool_result", name, str(payload)[:300]))
                 messages.append(tool_result_message(call_id, json.dumps(result)))
             steps.append(Step(turn, "message", "assistant", "requested %d tool call(s)" % len(calls)))
 
             # Loop guard: same tool+args twice back-to-back means the model is stuck.
-            tool_calls_log = [s for s in steps if s.kind == "tool_call"]
-            if (len(tool_calls_log) >= 2
-                    and tool_calls_log[-1].name == tool_calls_log[-2].name
-                    and tool_calls_log[-1].detail == tool_calls_log[-2].detail):
-                answer = "Stopped: repeated identical tool call (%s) -- possible loop." % tool_calls_log[-1].name
+            if (len(exchanges) >= 2
+                    and exchanges[-1].name == exchanges[-2].name
+                    and exchanges[-1].arguments == exchanges[-2].arguments):
+                answer = "Stopped: repeated identical tool call (%s) -- possible loop." % exchanges[-1].name
                 answer_turn = turn
+                stop_reason = "repeated_call"
                 break
 
         if not answer:
             answer = "Stopped: turn budget (%d) exceeded without a final answer." % self.max_turns
             answer_turn = self.max_turns
+            stop_reason = "turn_budget"
 
         if self.memory is not None:
             try:
@@ -145,6 +159,12 @@ class Agent:
         return AgentResult(
             answer=answer,
             turns=answer_turn,
+            evidence=RunEvidence(
+                task=task,
+                answer=answer,
+                exchanges=tuple(exchanges),
+                stop_reason=stop_reason,
+            ),
             tool_calls=tool_calls,
             context_chars=sum(len(json.dumps(m)) for m in messages),
             steps=steps,
