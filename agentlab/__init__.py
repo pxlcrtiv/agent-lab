@@ -10,5 +10,6 @@ __version__ = "0.1.0"
 from .agent import Agent, AgentResult  # noqa: F401
 from .llm import MockBackend, OpenAICompatBackend  # noqa: F401
 from .memory import Memory  # noqa: F401
+from .run_evidence import RunEvidence, ToolExchange  # noqa: F401
 from .tools import Tool, ToolRegistry, tool  # noqa: F401
 from .workflow import Workflow, WorkflowResult  # noqa: F401

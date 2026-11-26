@@ -89,7 +89,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _print_run(result)
     if args.critic:
         critic = MockCritic(backend) if backend.name == "mock" else Critic(backend, max_revisions=args.max_revisions)
-        critique = critic.run(args.task, result.answer, steps=result.steps)
+        critique = critic.run(result.evidence)
         _print_critic(critique)
     return 0
 
